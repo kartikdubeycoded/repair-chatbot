@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+venv/
+env/
+
+# Database files
+*.db
+*.db-journal
+
+# ChromaDB
+chroma_db/
+
+# Model files
+models/
+*.gguf
+
+# Dataset
+MyFixit-Dataset/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Excel exports
+*.xlsx
