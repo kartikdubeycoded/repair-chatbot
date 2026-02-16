@@ -61,8 +61,12 @@ print("✓ All components loaded!\n")
 conversation_state = {
     "active_brand": None,
     "active_model": None,
-    "active_guide_locked": False
+    "active_guide_locked": False,
+    "language":"English"
 }
+def update_language(lang):
+    """Update preferred reply language for the active session."""
+    conversation_state["language"] = lang
 
 def log_conversation(question, response, sources, response_time, context_info):
     """Save conversation to database"""
@@ -81,7 +85,7 @@ def chat(message, history):
     global conversation_state
     
     start_time = time.time()
-    
+    reply_language = conversation_state.get("language", "English")
     # Step 1: Check if this is a vague first question
     is_vague, reason = is_vague_question(message, history)
     
@@ -136,17 +140,24 @@ def chat(message, history):
             sources.append(metadata['title'])
     
     # Step 6: Create prompt
+
+    language_instruction = (
+        "Respond in Dutch. Keep technical terms clear and practical for a Dutch-speaking repair engineer."
+        if reply_language == "Dutch"
+        else "Respond in English."
+    )
+
     if context:
         prompt = f"""You are a repair assistant. Answer based on these repair guides:
 
 {context}
 
 Question: {message}
-
+{language_instruction}
 Provide a clear, concise answer with specific steps:"""
     else:
         prompt = f"""Question: {message}
-
+{language_instruction}
 Provide brief general repair advice:"""
     
     # Step 7: Generate response with STREAMING
@@ -190,24 +201,36 @@ Provide brief general repair advice:"""
     log_conversation(message, full_response, sources, response_time, context_info)
 
 # Gradio interface
-demo = gr.ChatInterface(
-    fn=chat,
-    title="🔧 Smart Repair Assistant (Streaming)",
-    description="""
-    **AI repair assistant with live streaming responses**
-    
-     Tell me your appliance brand/model for faster, more accurate help!
-     I remember context across the conversation
-     Responses stream in real-time as they're generated
-     18,995 repair guides
-    """,
-    examples=[
-        "My washing machine is broken",
-        "My Kenmore Elite HE3 won't drain",
-        "Samsung refrigerator not cooling",
-    ]
-)
+#
+with gr.Blocks(title="🔧 Smart Repair Assistant (Streaming)") as demo:
+    gr.Markdown("# 🔧 Smart Repair Assistant (Streaming)")
+    gr.Markdown(
+        """
+        **AI repair assistant with live streaming responses**
 
+        - Tell me your appliance brand/model for faster, more accurate help!
+        - I remember context across the conversation
+        - Responses stream in real-time as they're generated
+        - 18,995 repair guides
+        """
+    )
+
+    language = gr.Radio(
+        choices=["English", "Dutch"],
+        value="English",
+        label="Reply language / Antwoordtaal"
+    )
+    language.change(update_language, language, None)
+
+    gr.ChatInterface(
+        fn=chat,
+        examples=[
+            "My washing machine is broken",
+            "My Kenmore Elite HE3 won't drain",
+            "Samsung refrigerator not cooling",
+            "Mijn wasmachine pompt geen water af",
+        ]
+    )
 if __name__ == "__main__":
     print("="*60)
     print(" Starting Smart Chatbot with Streaming...")
