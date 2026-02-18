@@ -264,7 +264,7 @@ init_database()
 model, tokenizer = load_model_and_tokenizer()
 print("✓ All components loaded!\n")
 
-with gr.Blocks(title="🔧 Smart Repair Assistant (non-llama.cpp)") as demo:
+with gr.Blocks(title="🔧 Smart Repair Assistant (transformers)") as demo:
     gr.Markdown("# 🔧 Smart Repair Assistant")
     gr.Markdown(
         """
@@ -298,7 +298,6 @@ if __name__ == "__main__":
     print("=" * 60)
     print(" Starting Smart Chatbot with Streaming (transformers, NON-GPTQ)...")
     print("=" * 60)
-    print("Opening chatbot in your default browser: http://127.0.0.1:7860")
 
     demo.launch(
         share=False,
