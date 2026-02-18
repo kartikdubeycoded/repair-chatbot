@@ -2,36 +2,31 @@ import os
 import sqlite3
 import threading
 import time
-from typing import Dict, Generator, List, Tuple
 
-# Optional offline mode. Set REPAIR_CHATBOT_OFFLINE=1 after local model download.
+# Optional offline mode: set REPAIR_CHATBOT_OFFLINE=1 after model download.
 if os.getenv("REPAIR_CHATBOT_OFFLINE", "0") == "1":
     os.environ["HF_HUB_OFFLINE"] = "1"
     os.environ["TRANSFORMERS_OFFLINE"] = "1"
     os.environ["HF_DATASETS_OFFLINE"] = "1"
 
 import gradio as gr
-import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer, TextIteratorStreamer
 
 from context_manager import (
-    extract_brand_and_model,
-    generate_clarification_prompt,
-    get_last_user_messages,
     is_vague_question,
+    generate_clarification_prompt,
+    extract_brand_and_model,
+    get_last_user_messages,
 )
 from smart_search import search_all_guides, search_by_brand_model
-
-print("Starting Smart Repair Chatbot (Transformers backend, non-llama.cpp)...\n")
 
 MODEL_DIR = "./models2"
 DB_PATH = "conversation_logs.db"
 
+print("Starting Smart Repair Chatbot (Transformers backend, non-llama.cpp)...\n")
 
-# -------------------------------
-# Persistence
-# -------------------------------
-def init_database() -> None:
+
+def init_database():
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute(
@@ -51,13 +46,7 @@ def init_database() -> None:
     conn.close()
 
 
-def log_conversation(
-    question: str,
-    response: str,
-    sources: List[str],
-    response_time: float,
-    context_info: str,
-) -> None:
+def log_conversation(question, response, sources, response_time, context_info):
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     sources_str = " | ".join(sources) if sources else "None"
@@ -72,33 +61,30 @@ def log_conversation(
     conn.close()
 
 
-# -------------------------------
-# Model loading
-# -------------------------------
-def load_model_and_tokenizer() -> Tuple[AutoModelForCausalLM, AutoTokenizer]:
-    """Load NON-GPTQ local model from ./models2 for reliable transformers inference."""
+def load_model_and_tokenizer():
+    """Load NON-GPTQ local model from ./models2."""
     if not os.path.isdir(MODEL_DIR):
         raise FileNotFoundError(
             f"Model directory not found: {MODEL_DIR}. "
-            "Put a NON-GPTQ Transformers model in ./models2 (config.json, tokenizer files, weights)."
+            "Put your NON-GPTQ model files in ./models2"
         )
 
     required_files = ["config.json", "tokenizer_config.json"]
     missing = [f for f in required_files if not os.path.exists(os.path.join(MODEL_DIR, f))]
     if missing:
         raise FileNotFoundError(
-            f"Missing model files in {MODEL_DIR}: {missing}. "
-            "Please verify your local model folder contents."
+            f"Missing required files in {MODEL_DIR}: {missing}. "
+            "Expected at least config.json and tokenizer_config.json"
         )
 
-    with open(os.path.join(MODEL_DIR, "config.json"), "r", encoding="utf-8") as f:
+    config_path = os.path.join(MODEL_DIR, "config.json")
+    with open(config_path, "r", encoding="utf-8") as f:
         config_text = f.read().lower()
 
     if '"quantization_config"' in config_text and '"gptq"' in config_text:
         raise RuntimeError(
-            "Detected GPTQ model in ./models2.\n"
-            "This script is for NON-GPTQ models to avoid dependency instability.\n"
-            "Replace ./models2 with a non-GPTQ model (for example: Qwen/Qwen2.5-1.5B-Instruct)."
+            "Detected GPTQ model in ./models2. This script is for NON-GPTQ models.\n"
+            "Use a non-GPTQ model (for example: Qwen/Qwen2.5-1.5B-Instruct)."
         )
 
     print(f"Loading NON-GPTQ local model from: {MODEL_DIR}")
@@ -121,10 +107,8 @@ def load_model_and_tokenizer() -> Tuple[AutoModelForCausalLM, AutoTokenizer]:
     return model, tokenizer
 
 
-# -------------------------------
-# Chat generation
-# -------------------------------
-def stream_response(prompt: str) -> Generator[str, None, None]:
+def stream_response(prompt):
+    """Stream generated tokens from the model."""
     messages = [
         {
             "role": "system",
@@ -134,13 +118,12 @@ def stream_response(prompt: str) -> Generator[str, None, None]:
     ]
 
     input_text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-    inputs = tokenizer(input_text, return_tensors="pt")
-    inputs = {k: v.to(model.device) for k, v in inputs.items()}
+    model_inputs = tokenizer([input_text], return_tensors="pt").to(model.device)
 
     streamer = TextIteratorStreamer(tokenizer, skip_prompt=True, skip_special_tokens=True)
 
     generation_kwargs = {
-        **inputs,
+        **model_inputs,
         "max_new_tokens": 320,
         "temperature": 0.3,
         "do_sample": True,
@@ -158,21 +141,19 @@ def stream_response(prompt: str) -> Generator[str, None, None]:
     thread.join()
 
 
-# -------------------------------
-# App state
-# -------------------------------
-conversation_state: Dict[str, str] = {
+# Shared conversation state
+conversation_state = {
     "active_brand": None,
     "active_model": None,
     "language": "English",
 }
 
 
-def update_language(lang: str) -> None:
+def update_language(lang):
     conversation_state["language"] = lang
 
 
-def build_search_context(message: str, history: List[List[str]]) -> Tuple[str, List[str], str, str]:
+def build_search_context(message, history):
     extracted = extract_brand_and_model(message)
 
     if extracted["brand"]:
@@ -180,7 +161,8 @@ def build_search_context(message: str, history: List[List[str]]) -> Tuple[str, L
         conversation_state["active_model"] = extracted["model"]
 
     if not conversation_state["active_brand"] and history:
-        for prev_msg in get_last_user_messages(history, count=2):
+        last_messages = get_last_user_messages(history, count=2)
+        for prev_msg in last_messages:
             prev_extracted = extract_brand_and_model(prev_msg)
             if prev_extracted["brand"]:
                 conversation_state["active_brand"] = prev_extracted["brand"]
@@ -198,7 +180,7 @@ def build_search_context(message: str, history: List[List[str]]) -> Tuple[str, L
         context_info = "general_search"
 
     context = ""
-    sources: List[str] = []
+    sources = []
 
     if search_results.get("metadatas") and search_results["metadatas"][0]:
         for i, doc in enumerate(search_results["documents"][0]):
@@ -207,22 +189,30 @@ def build_search_context(message: str, history: List[List[str]]) -> Tuple[str, L
             context += f"\n--- Guide {i+1}: {metadata['title']} ---\n{short_doc}\n"
             sources.append(metadata["title"])
 
-    return context, sources, context_info, brand if brand else model_name
+    display_brand_model = None
+    if brand and model_name:
+        display_brand_model = f"{brand} {model_name}"
+    elif brand:
+        display_brand_model = brand
+    elif model_name:
+        display_brand_model = model_name
+
+    return context, sources, context_info, display_brand_model
 
 
-def chat(message: str, history: List[List[str]]):
+def chat(message, history):
     start_time = time.time()
     reply_language = conversation_state.get("language", "English")
 
-    vague, reason = is_vague_question(message, history)
-    if vague:
+    is_vague, reason = is_vague_question(message, history)
+    if is_vague:
         response = generate_clarification_prompt(message, reason)
         response_time = time.time() - start_time
         log_conversation(message, response, [], response_time, "clarification_requested")
         yield response
         return
 
-    context, sources, context_info, brand_or_model = build_search_context(message, history)
+    context, sources, context_info, display_brand_model = build_search_context(message, history)
 
     language_instruction = (
         "Respond in Dutch. Keep technical terms clear and practical for a Dutch-speaking repair engineer."
@@ -244,8 +234,9 @@ Provide a clear, concise answer with specific steps."""
 Provide brief general repair advice."""
 
     full_response = ""
-    if brand_or_model:
-        full_response = f"**[{brand_or_model}]**\n\n"
+
+    if display_brand_model:
+        full_response = f"**[{display_brand_model}]**\n\n"
         yield full_response
 
     for token in stream_response(prompt):
@@ -258,7 +249,8 @@ Provide brief general repair advice."""
     if sources:
         footer += f"\n\n**Sources:** {sources[0]}"
         if len(sources) > 1:
-            footer += f" (+{len(sources) - 1} more)"
+            footer += f" (+{len(sources)-1} more)"
+
     footer += f"\n\n_{response_time:.1f}s_"
 
     full_response += footer
@@ -267,9 +259,7 @@ Provide brief general repair advice."""
     log_conversation(message, full_response, sources, response_time, context_info)
 
 
-# -------------------------------
-# Boot app
-# -------------------------------
+# Boot
 init_database()
 model, tokenizer = load_model_and_tokenizer()
 print("✓ All components loaded!\n")
