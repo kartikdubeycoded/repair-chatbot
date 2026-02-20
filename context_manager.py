@@ -299,3 +299,167 @@ if __name__ == "__main__":
         print(f"Brand: {result['brand']}")
         print(f"Model: {result['model']}")
         print(f"Full: {result['full_text']}")
+import re
+
+
+def classify_query_type(message: str, history: list) -> str:
+    """Classify incoming message for routing."""
+    message_lower = message.strip().lower()
+    word_count = len(message.split())
+
+    greetings = ['hi', 'hello', 'hey', 'good morning', 'good afternoon', 'good evening', 'how are you']
+    if word_count <= 5 and any(greeting in message_lower for greeting in greetings):
+        return 'greeting'
+
+    closings = ['thanks', 'thank you', 'bye', 'goodbye', 'that helps', "that's all"]
+    if any(closing in message_lower for closing in closings):
+        return 'closing'
+
+    if message.strip().isdigit() or any(
+        token in message_lower for token in ['option', 'number', 'first', 'second', 'third']
+    ):
+        return 'device_selection'
+
+    if word_count <= 10 and len(history) > 0:
+        previous_assistant = next((m for m in reversed(history) if m.get('role') == 'assistant'), None)
+        if previous_assistant:
+            prev_text = previous_assistant.get('content', [{}])[0].get('text', '')
+            if '?' in prev_text:
+                return 'clarification'
+
+    repair_indicators = [
+        'fix', 'repair', 'replace', 'broken', 'not working', "won't", "doesn't",
+        'error', 'problem', 'issue', 'how to', 'how do i', 'change', 'install'
+    ]
+    if any(indicator in message_lower for indicator in repair_indicators):
+        return 'repair_question'
+
+    if extract_brand_and_model(message)['brand']:
+        return 'repair_question'
+
+    if word_count <= 6 and len(history) > 0:
+        return 'clarification'
+
+    return 'repair_question'
+
+
+def handle_greeting(language: str = 'English') -> str:
+    """Return a low-latency greeting."""
+    if language == 'Dutch':
+        return (
+            "Hallo! Ik ben de Reparatie Assistent.\n\n"
+            "Ik kan je helpen met reparaties voor:\n"
+            "• Cameras\n• Smartphones\n• Laptops\n• Huishoudelijke apparaten\n• En meer...\n\n"
+            "Vertel me welk apparaat je wilt repareren!"
+        )
+
+    return (
+        "Hello! I'm the Repair Assistant.\n\n"
+        "I can help you fix:\n"
+        "• Cameras\n• Smartphones\n• Laptops\n• Home appliances\n• And more...\n\n"
+        "Tell me what device you need to repair!"
+    )
+
+
+def generate_alternative_options(query_info: dict, search_results: list, language: str = 'English') -> str:
+    """Return disambiguation message for medium-confidence retrievals."""
+    if not search_results:
+        if language == 'Dutch':
+            return (
+                f"Ik heb geen reparatiegids voor {query_info.get('brand')} {query_info.get('model')}.\n\n"
+                "Probeer:\n• Controleer het modelnummer opnieuw\n"
+                "• Zoek naar een specifiek onderdeel (bijv. 'scherm', 'batterij')\n"
+                "• Vertel me meer over het probleem"
+            )
+        return (
+            f"I don't have a repair guide for {query_info.get('brand')} {query_info.get('model')}.\n\n"
+            "Try:\n• Double-check the model number\n"
+            "• Search for a specific component (e.g., 'screen', 'battery')\n"
+            "• Tell me more about the problem"
+        )
+
+    option_lines = []
+    for index, result in enumerate(search_results[:5], 1):
+        title = result['metadata'].get('title', 'Unknown guide')
+        option_lines.append(f"{index}. {title} (confidence: {result['score']}%)")
+
+    options_text = "\n".join(option_lines)
+    if language == 'Dutch':
+        return (
+            f"Ik heb geen exacte gids voor {query_info.get('brand')} {query_info.get('model')}, "
+            f"maar ik vond vergelijkbare apparaten:\n\n{options_text}\n\n"
+            "Is een van deze je apparaat? Antwoord met het nummer (bijv. '1' of '2')."
+        )
+    return (
+        f"I don't have an exact guide for {query_info.get('brand')} {query_info.get('model')}, "
+        f"but I found similar devices:\n\n{options_text}\n\n"
+        "Is one of these your device? Reply with the number (e.g., '1' or '2')."
+    )
+
+
+def validate_response_quality(response: str, query_info: dict, source_guides: list) -> dict:
+    """Validate model answer quality and hallucination risk."""
+    validation = {
+        'accuracy_score': 100.0,
+        'issues_detected': [],
+        'hallucination_risk': 'low',
+        'pass': True,
+    }
+
+    response_lower = response.lower()
+    brand = query_info.get('brand')
+    model = query_info.get('model')
+
+    if brand and brand.lower() not in response_lower:
+        validation['issues_detected'].append('Brand name missing from response')
+        validation['accuracy_score'] -= 20
+        validation['hallucination_risk'] = 'high'
+
+    if model and model.lower() not in response_lower:
+        source_titles = ' '.join(g.get('metadata', {}).get('title', '') for g in source_guides).lower()
+        if model.lower() not in source_titles:
+            validation['issues_detected'].append('Response references different model than query')
+            validation['accuracy_score'] -= 30
+            validation['hallucination_risk'] = 'high'
+
+    if source_guides:
+        source_text = ' '.join(g.get('document', '') for g in source_guides)
+        if source_text and len(response) > len(source_text) * 1.8:
+            validation['issues_detected'].append('Response much longer than source (possible hallucination)')
+            validation['accuracy_score'] -= 15
+            if validation['hallucination_risk'] == 'low':
+                validation['hallucination_risk'] = 'medium'
+
+    steps = [
+        line.strip() for line in response.split('\n')
+        if re.match(r'^(step|stap)\b', line.strip(), flags=re.IGNORECASE)
+    ]
+    if len(steps) != len(set(steps)):
+        duplicates = len(steps) - len(set(steps))
+        validation['issues_detected'].append(f'Detected {duplicates} duplicate steps')
+        validation['accuracy_score'] -= 10 * duplicates
+        validation['hallucination_risk'] = 'medium'
+
+    if len(steps) > 15:
+        validation['issues_detected'].append(f'Unusually high step count ({len(steps)} steps)')
+        validation['accuracy_score'] -= 10
+        validation['hallucination_risk'] = 'medium'
+
+    component = query_info.get('component')
+    if component and component.lower() not in response_lower:
+        validation['issues_detected'].append('Requested component not mentioned in response')
+        validation['accuracy_score'] -= 15
+
+    if not source_guides:
+        refusal_phrases = ["don't have", 'no guide', 'not available', 'geen gids', 'niet beschikbaar']
+        if not any(phrase in response_lower for phrase in refusal_phrases):
+            validation['issues_detected'].append('Should have refused but provided answer anyway')
+            validation['accuracy_score'] -= 40
+            validation['hallucination_risk'] = 'high'
+            validation['pass'] = False
+
+    validation['accuracy_score'] = max(0, validation['accuracy_score'])
+    if validation['accuracy_score'] < 60 or validation['hallucination_risk'] == 'high':
+        validation['pass'] = False
+
+    return validation
